@@ -1,142 +1,116 @@
 (function () {
     'use strict';
 
-    var FEED_URL  = 'https://oper.ru/video.xml';
+    var FEED_URL = 'https://oper.ru/video.xml';
     var CACHE_TTL = 30 * 60 * 1000;
     var PAGE_SIZE = 30;
+    var pluginReady = 'plugin_goblin_oper_' + Lampa.Utils.uid(4);
 
-    var cache = {
-        data: null,
-        time: 0,
-        get: function () {
-            if (this.data && (Date.now() - this.time) < CACHE_TTL) return this.data;
-            return null;
-        },
-        set: function (d) { this.data = d; this.time = Date.now(); }
-    };
+    /* ── Кэш ──────────────────────────────────── */
+    var cache = { data: null, time: 0 };
+    function getCache() {
+        if (cache.data && (Date.now() - cache.time) < CACHE_TTL) return cache.data;
+        return null;
+    }
+    function setCache(d) { cache.data = d; cache.time = Date.now(); }
 
-    function fetchFeed(onSuccess, onError) {
-        var cached = cache.get();
-        if (cached) { onSuccess(cached); return; }
+    /* ── Сеть ─────────────────────────────────── */
+    function fetchFeed(onOk, onErr) {
+        var cached = getCache();
+        if (cached) { onOk(cached); return; }
 
-        var xhr = new XMLHttpRequest();
-        // Пробуем HTTPS, если не выйдет — HTTP
-        xhr.open('GET', FEED_URL, true);
-        xhr.timeout = 20000;
-
-        xhr.onreadystatechange = function () {
-            if (xhr.readyState !== 4) return;
-            if (xhr.status >= 200 && xhr.status < 400) {
-                try {
-                    var parsed = parseXML(xhr.responseText);
-                    cache.set(parsed);
-                    onSuccess(parsed);
-                } catch (e) {
-                    // Повтор через HTTP
-                    tryHttpFallback(onSuccess, onError);
-                }
-            } else if (xhr.status === 0) {
-                tryHttpFallback(onSuccess, onError);
-            } else {
-                onError('HTTP ' + xhr.status);
+        var net = new Lampa.Reguest();
+        net.timeout(20000);
+        net.native(FEED_URL, function (data) {
+            try {
+                var videos = parseXML(data);
+                setCache(videos);
+                onOk(videos);
+            } catch (e) {
+                onErr('Парсинг: ' + e.message);
             }
-        };
-
-        xhr.ontimeout = function () { tryHttpFallback(onSuccess, onError); };
-        xhr.onerror   = function () { tryHttpFallback(onSuccess, onError); };
-        xhr.send();
+        }, function () {
+            // fallback на HTTP
+            net.native('http://oper.ru/video.xml', function (data2) {
+                try {
+                    var videos = parseXML(data2);
+                    setCache(videos);
+                    onOk(videos);
+                } catch (e) { onErr('Парсинг: ' + e.message); }
+            }, function () { onErr('Сеть недоступна'); });
+        });
     }
 
-    function tryHttpFallback(onSuccess, onError) {
-        if (cache.get()) { onSuccess(cache.get()); return; }
-        var xhr2 = new XMLHttpRequest();
-        xhr2.open('GET', 'http://oper.ru/video.xml', true);
-        xhr2.timeout = 20000;
-        xhr2.onreadystatechange = function () {
-            if (xhr2.readyState !== 4) return;
-            if (xhr2.status >= 200 && xhr2.status < 400) {
-                try {
-                    var parsed = parseXML(xhr2.responseText);
-                    cache.set(parsed);
-                    onSuccess(parsed);
-                } catch (e) { onError('Ошибка парсинга: ' + e.message); }
-            } else {
-                onError('Не удалось загрузить фид (HTTP ' + xhr2.status + ')');
-            }
-        };
-        xhr2.ontimeout = function () { onError('Таймаут запроса'); };
-        xhr2.onerror   = function () { onError('Сетевая ошибка'); };
-        xhr2.send();
-    }
-
+    /* ── Парсинг XML ──────────────────────────── */
     function parseXML(xmlText) {
-        var parser = new DOMParser();
-        var doc = parser.parseFromString(xmlText, 'text/xml');
+        var doc = new DOMParser().parseFromString(xmlText, 'text/xml');
         if (doc.getElementsByTagName('parsererror').length) throw new Error('Невалидный XML');
 
         var items = doc.getElementsByTagName('item');
         var videos = [];
         for (var i = 0; i < items.length; i++) {
-            var item = items[i];
-            var title = getText(item, 'title');
-            var link = getText(item, 'link');
-            var pubDate = getText(item, 'pubDate');
-            var enclosure = item.getElementsByTagName('enclosure')[0];
-            var videoUrl = enclosure ? enclosure.getAttribute('url') : '';
-            var duration = getITunes(item, 'duration');
-            var category = getITunes(item, 'subtitle') || 'Разное';
-            var imgHref = getITunesAttr(item, 'image', 'href');
+            var it = items[i];
+            var title = txt(it, 'title');
+            var link = txt(it, 'link');
+            var pubDate = txt(it, 'pubDate');
+            var enc = it.getElementsByTagName('enclosure')[0];
+            var url = enc ? enc.getAttribute('url') : '';
+            var dur = itNS(it, 'duration');
+            var cat = itNS(it, 'subtitle') || 'Разное';
+            var img = itNSAttr(it, 'image', 'href');
 
-            if (!imgHref) {
-                var desc = getText(item, 'description') || '';
+            if (!img) {
+                var desc = txt(it, 'description') || '';
                 var m = desc.match(/src="([^"]+)"/);
-                if (m) imgHref = m[1];
+                if (m) img = m[1];
             }
-            if (!videoUrl) continue;
+            if (!url) continue;
 
-            // Приводим URL к HTTPS
-            if (videoUrl.indexOf('http://') === 0) videoUrl = 'https://' + videoUrl.slice(7);
-            if (imgHref && imgHref.indexOf('http://') === 0) imgHref = 'https://' + imgHref.slice(7);
+            // Принудительно HTTPS
+            if (url.indexOf('http://') === 0) url = 'https://' + url.slice(7);
+            if (img && img.indexOf('http://') === 0) img = 'https://' + img.slice(7);
 
             videos.push({
-                id: link, title: title, url: videoUrl, pageUrl: link,
-                poster: imgHref || '', category: category,
-                duration: duration || '', pubDate: pubDate || '',
-                description: stripHtml(getText(item, 'description') || '')
+                id: link, title: title, url: url, poster: img || '',
+                category: cat, duration: dur || '', pubDate: pubDate || '',
+                description: stripHtml(txt(it, 'description') || '').slice(0, 300)
             });
         }
         return videos;
     }
 
-    function getText(parent, tag) {
-        var el = parent.getElementsByTagName(tag)[0];
-        return el ? (el.textContent || '').trim() : '';
+    function txt(p, t) {
+        var e = p.getElementsByTagName(t)[0];
+        return e ? (e.textContent || '').trim() : '';
     }
-
-    function getITunes(parent, tag) {
-        var els = parent.getElementsByTagName(tag);
+    function itNS(p, t) {
+        var els = p.getElementsByTagName(t);
         for (var i = 0; i < els.length; i++) {
-            if (els[i].namespaceURI && els[i].namespaceURI.indexOf('itunes') > -1 || els[i].localName === tag)
+            if (els[i].namespaceURI && els[i].namespaceURI.indexOf('itunes') > -1 || els[i].localName === t)
                 return (els[i].textContent || '').trim();
         }
         return '';
     }
-
-    function getITunesAttr(parent, tag, attr) {
-        var els = parent.getElementsByTagName(tag);
+    function itNSAttr(p, t, a) {
+        var els = p.getElementsByTagName(t);
         for (var i = 0; i < els.length; i++) {
-            if (els[i].namespaceURI && els[i].namespaceURI.indexOf('itunes') > -1 || els[i].localName === tag)
-                return els[i].getAttribute(attr);
+            if (els[i].namespaceURI && els[i].namespaceURI.indexOf('itunes') > -1 || els[i].localName === t)
+                return els[i].getAttribute(a);
         }
         return '';
     }
-
-    function stripHtml(html) {
-        var tmp = document.createElement('div');
-        tmp.innerHTML = html;
-        return (tmp.textContent || tmp.innerText || '').trim().slice(0, 300);
+    function stripHtml(h) {
+        var d = document.createElement('div');
+        d.innerHTML = h;
+        return (d.textContent || d.innerText || '').trim();
+    }
+    function esc(s) {
+        var d = document.createElement('div');
+        d.appendChild(document.createTextNode(s || ''));
+        return d.innerHTML;
     }
 
+    /* ── Категории ───────────────────────────── */
     function getCategories(videos) {
         var seen = {}, cats = [];
         for (var i = 0; i < videos.length; i++) {
@@ -146,42 +120,53 @@
         return cats;
     }
 
-    function escapeHtml(str) {
-        var div = document.createElement('div');
-        div.appendChild(document.createTextNode(str || ''));
-        return div.innerHTML;
+    /* ── CSS ─────────────────────────────────── */
+    function injectCSS() {
+        if (document.getElementById('goblin-css')) return;
+        var s = document.createElement('style');
+        s.id = 'goblin-css';
+        s.textContent =
+            '.goblin-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;padding:16px;}' +
+            '.goblin-card{cursor:pointer;border-radius:8px;overflow:hidden;background:rgba(255,255,255,.05);}' +
+            '.goblin-card .card__view{position:relative;aspect-ratio:16/9;background:rgba(0,0,0,.3);}' +
+            '.goblin-card .card__img{width:100%;height:100%;object-fit:cover;}' +
+            '.goblin-card .card__badge{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.7);color:#fff;font-size:11px;padding:2px 8px;border-radius:4px;}' +
+            '.goblin-card .card__play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);opacity:0;}' +
+            '.goblin-card.focus .card__play{opacity:1;}' +
+            '.goblin-card .card__title{padding:8px 10px 4px;font-size:13px;line-height:1.3;max-height:34px;overflow:hidden;}' +
+            '.goblin-card .card__subtitle{padding:0 10px 10px;font-size:11px;opacity:.5;}' +
+            '.goblin-more{text-align:center;padding:20px;font-size:14px;opacity:.7;}' +
+            '.goblin-more.focus{opacity:1;}' +
+            '.goblin-loading,.goblin-error{text-align:center;padding:60px 20px;opacity:.6;}';
+        document.head.appendChild(s);
     }
 
-    /* ── Компонент ────────────────────────────────── */
-
+    /* ── Компонент ───────────────────────────── */
     function GoblinComponent(activity) {
         var self = this;
         self.activity = activity;
-        self.scroll = null;
-        self.filter = null;
         self.allVideos = [];
         self.filtered = [];
         self.currentCategory = 'Все';
         self.currentPage = 1;
         self.html = $('<div></div>');
+        self.scroll = null;
+        self.filter = null;
 
-        /* render() — обязательно для Lampa */
         self.render = function () { return self.html; };
 
         self.create = function () {
             var container = $(
-                '<div class="goblin-oper">' +
-                '  <div class="goblin-oper__filter"></div>' +
-                '  <div class="goblin-oper__content"></div>' +
+                '<div class="goblin-wrap">' +
+                '  <div class="goblin-filter"></div>' +
+                '  <div class="goblin-content"></div>' +
                 '</div>'
             );
             self.html.append(container);
 
             self.scroll = new Lampa.Scroll({ mask: true, over_mask: true });
-            self.content = container.find('.goblin-oper__content');
-            self.content.append(self.scroll.render());
-
-            self.filterContainer = container.find('.goblin-oper__filter');
+            container.find('.goblin-content').append(self.scroll.render());
+            self.filterWrap = container.find('.goblin-filter');
 
             self.showLoading();
 
@@ -196,18 +181,16 @@
 
         self.buildFilter = function () {
             var cats = getCategories(self.allVideos);
-            var filterComponents = {};
-            filterComponents.category = {
+            var fc = {};
+            fc.category = {
                 title: 'Категория',
-                items: [{ title: 'Все' }].concat(
-                    cats.map(function (c) { return { title: c }; })
-                )
+                items: [{ title: 'Все' }].concat(cats.map(function (c) { return { title: c }; }))
             };
 
             self.filter = new Lampa.Filter({
                 title: 'Тупичок Гоблина',
                 results: self.allVideos.length,
-                filter: filterComponents,
+                filter: fc,
                 onSort: function () {},
                 onFilter: function (state) {
                     self.currentCategory = state.category.selected.title || 'Все';
@@ -216,7 +199,7 @@
                 onBack: function () { Lampa.Activity.backward(); }
             });
 
-            self.filterContainer.append(self.filter.render());
+            self.filterWrap.append(self.filter.render());
         };
 
         self.applyFilter = function () {
@@ -232,38 +215,31 @@
             self.scroll.reset();
 
             var end = self.currentPage * PAGE_SIZE;
-            var pageVideos = self.filtered.slice(0, end);
-            var grid = $('<div class="goblin-oper__grid"></div>');
+            var page = self.filtered.slice(0, end);
+            var grid = $('<div class="goblin-grid"></div>');
 
-            pageVideos.forEach(function (video) {
-                grid.append(self.createCard(video));
-            });
-
+            page.forEach(function (v) { grid.append(self.makeCard(v)); });
             self.scroll.append(grid);
 
             if (end < self.filtered.length) {
-                var moreBtn = $(
-                    '<div class="goblin-oper__more selector">' +
-                    '  <span>Ещё (' + (self.filtered.length - end) + ')</span>' +
-                    '</div>'
-                );
-                moreBtn.on('hover:enter', function () {
+                var more = $('<div class="goblin-more selector"><span>Ещё (' + (self.filtered.length - end) + ')</span></div>');
+                more.on('hover:enter', function () {
                     self.currentPage++;
                     self.renderPage();
                 });
-                self.scroll.append(moreBtn);
+                self.scroll.append(more);
             }
 
             self.activity.toggle(false);
             Lampa.Controller.toggle('content');
         };
 
-        self.createCard = function (video) {
+        self.makeCard = function (v) {
             var card = $(
                 '<div class="card selector goblin-card">' +
                 '  <div class="card__view">' +
                 '    <img src="" alt="" class="card__img" />' +
-                '    <div class="card__badge">' + escapeHtml(video.category) + '</div>' +
+                '    <div class="card__badge">' + esc(v.category) + '</div>' +
                 '    <div class="card__play">' +
                 '      <svg width="40" height="40" viewBox="0 0 40 40">' +
                 '        <circle cx="20" cy="20" r="18" fill="rgba(0,0,0,0.6)" />' +
@@ -271,107 +247,84 @@
                 '      </svg>' +
                 '    </div>' +
                 '  </div>' +
-                '  <div class="card__title">' + escapeHtml(video.title) + '</div>' +
-                '  <div class="card__subtitle">' + escapeHtml(video.duration) + '</div>' +
+                '  <div class="card__title">' + esc(v.title) + '</div>' +
+                '  <div class="card__subtitle">' + esc(v.duration) + '</div>' +
                 '</div>'
             );
 
-            if (video.poster) card.find('.card__img').attr('src', video.poster);
+            if (v.poster) card.find('.card__img').attr('src', v.poster);
             else card.find('.card__img').hide();
 
-            card.on('hover:enter', function () { self.playVideo(video); });
+            card.on('hover:enter', function () { self.playVideo(v); });
             return card;
         };
 
-        self.playVideo = function (video) {
-            Lampa.Player.play({ title: video.title, url: video.url });
-            Lampa.Player.playlist([{ title: video.title, url: video.url }]);
-            Lampa.Player.video({ id: video.id });
+        self.playVideo = function (v) {
+            Lampa.Player.play({ title: v.title, url: v.url });
+            Lampa.Player.playlist([{ title: v.title, url: v.url }]);
+            Lampa.Player.video({ id: v.id });
         };
 
         self.showLoading = function () {
             self.scroll.clear();
-            self.scroll.append(
-                '<div class="goblin-oper__loading">' +
-                '  <div class="broadcast__scan"></div>' +
-                '  <div>Загрузка видео…</div>' +
-                '</div>'
-            );
+            self.scroll.append('<div class="goblin-loading"><div class="broadcast__scan"></div><div>Загрузка…</div></div>');
         };
 
         self.showError = function (msg) {
             self.scroll.clear();
             self.scroll.append(
-                '<div class="goblin-oper__error">' +
-                '  <div style="opacity:.7;margin-bottom:12px">Не удалось загрузить ленту</div>' +
-                '  <div style="opacity:.5;font-size:.9em">' + escapeHtml(msg) + '</div>' +
-                '</div>'
+                '<div class="goblin-error">' +
+                '<div style="opacity:.7;margin-bottom:12px">Не удалось загрузить ленту</div>' +
+                '<div style="opacity:.5;font-size:.9em">' + esc(msg) + '</div></div>'
             );
             Lampa.Controller.toggle('content');
         };
 
-        self.start  = function () { Lampa.Background.change(''); Lampa.Controller.toggle('content'); };
-        self.pause  = function () {};
-        self.stop   = function () {};
+        self.start = function () {
+            Lampa.Background.change('');
+            Lampa.Controller.toggle('content');
+        };
+        self.pause = function () {};
+        self.stop = function () {};
         self.destroy = function () {
-            self.scroll.destroy();
+            if (self.scroll) self.scroll.destroy();
             if (self.filter) self.filter.destroy();
             self.html.remove();
         };
     }
 
-    /* ── CSS ──────────────────────────────────────── */
-
-    function injectCSS() {
-        if (document.getElementById('goblin-plugin-css')) return;
-        var css =
-            '.goblin-oper__grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:16px; padding:16px; }' +
-            '.goblin-card { cursor:pointer; border-radius:8px; overflow:hidden; background:rgba(255,255,255,.05); }' +
-            '.goblin-card .card__view { position:relative; aspect-ratio:16/9; background:rgba(0,0,0,.3); }' +
-            '.goblin-card .card__img { width:100%; height:100%; object-fit:cover; }' +
-            '.goblin-card .card__badge { position:absolute; top:6px; left:6px; background:rgba(0,0,0,.7); color:#fff; font-size:11px; padding:2px 8px; border-radius:4px; }' +
-            '.goblin-card .card__play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); opacity:0; }' +
-            '.goblin-card.focus .card__play { opacity:1; }' +
-            '.goblin-card .card__title { padding:8px 10px 4px; font-size:13px; line-height:1.3; max-height:34px; overflow:hidden; }' +
-            '.goblin-card .card__subtitle { padding:0 10px 10px; font-size:11px; opacity:.5; }' +
-            '.goblin-oper__more { text-align:center; padding:20px; font-size:14px; opacity:.7; }' +
-            '.goblin-oper__more.focus { opacity:1; }' +
-            '.goblin-oper__loading, .goblin-oper__error { text-align:center; padding:60px 20px; opacity:.6; }';
-        var style = document.createElement('style');
-        style.id = 'goblin-plugin-css';
-        style.textContent = css;
-        document.head.appendChild(style);
-    }
-
-    /* ── Инициализация ────────────────────────────── */
-
+    /* ── Инициализация ───────────────────────── */
     function start() {
-        if (window.plugin_goblin_oper_ready) return;
-        window.plugin_goblin_oper_ready = true;
+        if (window[pluginReady]) return;
+        window[pluginReady] = true;
 
         injectCSS();
         Lampa.Component.add('goblin_oper', GoblinComponent);
 
-        /* Добавляем кнопку через API Lampa */
-        Lampa.Menu.addButton({
-            title: 'Гоблин',
-            icon: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
-                  '<path d="M3 3 L12 3 L12 21 L3 21 Z"/>' +
-                  '<path d="M12 3 L21 3 L21 21 L12 21 Z" opacity=".5"/>' +
-                  '</svg>',
-            action: 'goblin_oper'
-        });
+        // Добавляем пункт меню — через прямой DOM (работает во всех версиях)
+        var icon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+            '<path d="M3 3 L12 3 L12 21 L3 21 Z"/>' +
+            '<path d="M12 3 L21 3 L21 21 L12 21 Z" opacity=".5"/>' +
+            '</svg>';
 
-        /* Обработка нажатия через делегирование */
-        $(document).on('hover:enter', '[data-action="goblin_oper"]', function () {
+        var item = $(
+            '<li class="menu__item selector" data-action="goblin_oper">' +
+            '  <div class="menu__ico">' + icon + '</div>' +
+            '  <div class="menu__text">Гоблин</div>' +
+            '</li>'
+        );
+
+        // Привязываем hover:enter прямо на элемент!
+        item.on('hover:enter', function () {
             Lampa.Activity.push({
                 url: '',
                 title: 'Тупичок Гоблина',
                 component: 'goblin_oper',
-                page: 1,
-                data: {}
+                page: 1
             });
         });
+
+        $('.menu .menu__list').eq(0).append(item);
     }
 
     if (window.appready) start();
