@@ -16,6 +16,7 @@
     function fetchFeed(onOk, onErr) {
         var cached = getCache();
         if (cached) { onOk(cached); return; }
+
         var net = new Lampa.Reguest();
         net.timeout(20000);
         net.native(FEED_URL, function (data) {
@@ -43,27 +44,68 @@
             var dur = itNS(it, 'duration');
             var cat = itNS(it, 'subtitle') || 'Разное';
             var img = itNSAttr(it, 'image', 'href');
-            if (!img) { var d = txt(it, 'description') || ''; var m = d.match(/src="([^"]+)"/); if (m) img = m[1]; }
+            if (!img) {
+                var d = txt(it, 'description') || '';
+                var m = d.match(/src="([^"]+)"/);
+                if (m) img = m[1];
+            }
             if (!url) continue;
             if (url.indexOf('http://') === 0) url = 'https://' + url.slice(7);
             if (img && img.indexOf('http://') === 0) img = 'https://' + img.slice(7);
-            videos.push({ id: link, title: title, url: url, poster: img || '', category: cat, duration: dur || '' });
+            videos.push({
+                id: link, title: title, url: url, poster: img || '',
+                category: cat, duration: dur || ''
+            });
         }
         return videos;
     }
 
-    function txt(p, t) { var e = p.getElementsByTagName(t)[0]; return e ? (e.textContent || '').trim() : ''; }
-    function itNS(p, t) { var els = p.getElementsByTagName(t); for (var i = 0; i < els.length; i++) { if (els[i].namespaceURI && els[i].namespaceURI.indexOf('itunes') > -1 || els[i].localName === t) return (els[i].textContent || '').trim(); } return ''; }
-    function itNSAttr(p, t, a) { var els = p.getElementsByTagName(t); for (var i = 0; i < els.length; i++) { if (els[i].namespaceURI && els[i].namespaceURI.indexOf('itunes') > -1 || els[i].localName === t) return els[i].getAttribute(a); } return ''; }
-    function esc(s) { var d = document.createElement('div'); d.appendChild(document.createTextNode(s || '')); return d.innerHTML; }
+    function txt(p, t) {
+        var e = p.getElementsByTagName(t)[0];
+        return e ? (e.textContent || '').trim() : '';
+    }
+    function itNS(p, t) {
+        var els = p.getElementsByTagName(t);
+        for (var i = 0; i < els.length; i++) {
+            if (els[i].namespaceURI && els[i].namespaceURI.indexOf('itunes') > -1 || els[i].localName === t)
+                return (els[i].textContent || '').trim();
+        }
+        return '';
+    }
+    function itNSAttr(p, t, a) {
+        var els = p.getElementsByTagName(t);
+        for (var i = 0; i < els.length; i++) {
+            if (els[i].namespaceURI && els[i].namespaceURI.indexOf('itunes') > -1 || els[i].localName === t)
+                return els[i].getAttribute(a);
+        }
+        return '';
+    }
+    function esc(s) {
+        var d = document.createElement('div');
+        d.appendChild(document.createTextNode(s || ''));
+        return d.innerHTML;
+    }
+
+    function getCategories(videos) {
+        var seen = {}, cats = [];
+        for (var i = 0; i < videos.length; i++) {
+            var c = videos[i].category;
+            if (!seen[c]) { seen[c] = true; cats.push(c); }
+        }
+        return cats;
+    }
 
     function injectCSS() {
         if (document.getElementById('goblin-css')) return;
         var s = document.createElement('style');
         s.id = 'goblin-css';
         s.textContent =
+            '.goblin-wrap{padding:0;}' +
+            '.goblin-toolbar{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px;}' +
+            '.goblin-chip{padding:6px 14px;border-radius:20px;background:rgba(255,255,255,.08);font-size:13px;cursor:pointer;white-space:nowrap;}' +
+            '.goblin-chip.active{background:var(--primary,#2196f3);color:#fff;}' +
             '.goblin-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;padding:16px;}' +
-            '.goblin-card{border-radius:8px;overflow:hidden;background:rgba(255,255,255,.05);}' +
+            '.goblin-card{border-radius:8px;overflow:hidden;background:rgba(255,255,255,.05);cursor:pointer;}' +
             '.goblin-card .card__view{position:relative;aspect-ratio:16/9;background:rgba(0,0,0,.3);}' +
             '.goblin-card .card__img{width:100%;height:100%;object-fit:cover;}' +
             '.goblin-card .card__badge{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.7);color:#fff;font-size:11px;padding:2px 8px;border-radius:4px;}' +
@@ -77,50 +119,80 @@
         document.head.appendChild(s);
     }
 
-    /* ── Компонент (по образцу реальных плагинов Lampa) ── */
-
+    /* ── Компонент ───────────────────────────── */
     function GoblinComponent(object) {
         var self = this;
         self.object = object;
 
         var scroll = new Lampa.Scroll({ mask: true, over: true });
-        var files = new Lampa.Files(object);
-        var network = new Lampa.Reguest();
-
+        var html = $('<div class="goblin-wrap"></div>');
         var allVideos = [];
         var filtered = [];
         var currentPage = 1;
+        var currentCategory = 'Все';
         var last = false;
+        var toolbar = null;
 
-        /* render() — возвращает files.render(), а НЕ jQuery-объект */
-        this.render = function () { return files.render(); };
+        this.render = function () { return html; };
 
-        /* create() — должен вернуть this.render() */
         this.create = function () {
-            object.activity.loader(true);
-            files.append(scroll.render());
+            html.append(scroll.render());
             scroll.append($('<div class="goblin-loading"><div class="broadcast__scan"></div><div>Загрузка ленты…</div></div>'));
 
             fetchFeed(function (videos) {
                 allVideos = videos;
                 filtered = videos;
-                currentPage = 1;
                 self.renderPage();
             }, function (err) {
                 scroll.clear();
                 scroll.append(
                     $('<div class="goblin-error">' +
-                    '<div style="opacity:.7;margin-bottom:12px">Не удалось загрузить ленту</div>' +
-                    '<div style="opacity:.5;font-size:.9em">' + esc(err) + '</div></div>')
+                      '<div style="opacity:.7;margin-bottom:12px">Не удалось загрузить ленту</div>' +
+                      '<div style="opacity:.5;font-size:.9em">' + esc(err) + '</div></div>')
                 );
-                object.activity.toggle();
+                self.start();
             });
 
             return this.render();
         };
 
-        this.renderPage = function () {
+        self.buildToolbar = function () {
+            var cats = getCategories(allVideos);
+            toolbar = $('<div class="goblin-toolbar"></div>');
+
+            var allChip = $('<div class="goblin-chip selector active">Все</div>');
+            allChip.on('hover:enter', function () {
+                currentCategory = 'Все';
+                filtered = allVideos;
+                currentPage = 1;
+                toolbar.find('.goblin-chip').removeClass('active');
+                allChip.addClass('active');
+                self.renderPage();
+            });
+            toolbar.append(allChip);
+
+            cats.forEach(function (c) {
+                var chip = $('<div class="goblin-chip selector">' + esc(c) + '</div>');
+                chip.on('hover:enter', function () {
+                    currentCategory = c;
+                    filtered = allVideos.filter(function (v) { return v.category === c; });
+                    currentPage = 1;
+                    toolbar.find('.goblin-chip').removeClass('active');
+                    chip.addClass('active');
+                    self.renderPage();
+                });
+                toolbar.append(chip);
+            });
+
+            return toolbar;
+        };
+
+        self.renderPage = function () {
             scroll.clear();
+            scroll.reset();
+
+            if (!toolbar) toolbar = self.buildToolbar();
+            scroll.append(toolbar);
 
             var end = currentPage * PAGE_SIZE;
             var page = filtered.slice(0, end);
@@ -142,7 +214,7 @@
             self.start();
         };
 
-        this.makeCard = function (v) {
+        self.makeCard = function (v) {
             var card = $(
                 '<div class="card selector goblin-card">' +
                 '  <div class="card__view">' +
@@ -172,17 +244,16 @@
             return card;
         };
 
-        this.playVideo = function (v) {
+        self.playVideo = function (v) {
             Lampa.Player.play({ title: v.title, url: v.url });
             Lampa.Player.playlist([{ title: v.title, url: v.url }]);
             Lampa.Player.video({ id: v.id });
         };
 
-        /* Навигация — как в реальных плагинах */
         this.start = function () {
             Lampa.Controller.add('content', {
                 toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render(), files.render());
+                    Lampa.Controller.collectionSet(scroll.render());
                     Lampa.Controller.collectionFocus(last || false, scroll.render());
                 },
                 up: function () { Navigator.move('up'); },
@@ -192,24 +263,20 @@
                     if (Navigator.canmove('left')) Navigator.move('left');
                     else Lampa.Controller.toggle('menu');
                 },
-                back: this.back
+                back: function () { Lampa.Activity.backward(); }
             });
             Lampa.Controller.toggle('content');
         };
 
-        this.back = function () { Lampa.Activity.backward(); };
         this.pause = function () {};
         this.stop = function () {};
-
         this.destroy = function () {
-            network.clear();
             scroll.destroy();
-            files.destroy();
+            html.remove();
         };
     }
 
     /* ── Инициализация ───────────────────────── */
-
     function start() {
         injectCSS();
         Lampa.Component.add('goblin_oper', GoblinComponent);
